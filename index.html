@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Outlook Unified Calendar</title>
+  <meta name="theme-color" content="#0078d4">
+  <link rel="manifest" href="manifest.json">
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.css" rel="stylesheet">
+  <style>
+    :root { --bg: #f5f5f5; --card: #fff; --primary: #0078d4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: #222; }
+    header { background: var(--primary); color: white; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { background: white; color: var(--primary); border: none; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    button:hover { background: #e6f2ff; }
+    button.secondary { background: transparent; color: white; border: 1px solid white; }
+    #sidebar { width: 280px; background: var(--card); padding: 12px; border-right: 1px solid #ddd; overflow-y: auto; }
+    #layout { display: flex; height: calc(100vh - 60px); }
+    #calendar-container { flex: 1; padding: 12px; overflow: auto; }
+    #calendar { background: white; border-radius: 8px; padding: 8px; min-height: 600px; }
+    .account-item { margin-bottom: 12px; padding: 8px; background: #f0f7ff; border-radius: 6px; }
+    .account-item strong { display: block; margin-bottom: 4px; }
+    .cal-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; margin: 4px 0; }
+    .status { font-size: 0.85rem; color: #555; padding: 4px 16px; }
+    @media (max-width: 800px) {
+      #layout { flex-direction: column; height: auto; }
+      #sidebar { width: 100%; border-right: none; border-bottom: 1px solid #ddd; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Outlook Unified Calendar</h1>
+    <div class="controls">
+      <button id="addAccount">Add Account</button>
+      <button id="refresh" class="secondary">Refresh</button>
+      <button id="logout" class="secondary">Sign Out All</button>
+    </div>
+  </header>
+  <div class="status" id="status">Loading...</div>
+  <div id="layout">
+    <aside id="sidebar">
+      <h3 style="margin-top:0">Accounts & Calendars</h3>
+      <div id="accountsList">No accounts signed in yet.</div>
+    </aside>
+    <div id="calendar-container">
+      <div id="calendar"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+  <script>
+    // ====== CONFIG ====== 
+    const CLIENT_ID = 'YOUR_CLIENT_ID_HERE'; // <-- replace with your Azure app client ID
+    const AUTHORITY = 'https://login.microsoftonline.com/common';
+    const REDIRECT_URI = window.location.origin + window.location.pathname;
+    const SCOPES = ['Calendars.Read', 'User.Read'];
+
+    const msalConfig = {
+      auth: { clientId: CLIENT_ID, authority: AUTHORITY, redirectUri: REDIRECT_URI },
+      cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
+    };
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+
+    let calendar;
+    let allEvents = [];
+    let calendarVisibility = {}; // key: account+calId
+
+    const colors = ['#0078d4', '#107c10', '#d83b01', '#5c2d91', '#008272', '#e3008c', '#ff8c00'];
+
+    async function init() {
+      await msalInstance.initialize();
+      document.getElementById('addAccount').onclick = addAccount;
+      document.getElementById('refresh').onclick = loadAllEvents;
+      document.getElementById('logout').onclick = logoutAll;
+      initCalendar();
+      updateUI();
+      if (msalInstance.getAllAccounts().length > 0) loadAllEvents();
+    }
+
+    function initCalendar() {
+      const el = document.getElementById('calendar');
+      calendar = new FullCalendar.Calendar(el, {
+        initialView: 'dayGridMonth',
+        headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek' },
+        height: 'auto',
+        events: function(info, successCallback) {
+          const filtered = allEvents.filter(e => calendarVisibility[e.extendedProps.key] !== false);
+          successCallback(filtered);
+        },
+        eventClick: function(info) {
+          alert(`${info.event.title}\n${info.event.extendedProps.account}\n${info.event.start.toLocaleString()} - ${info.event.end?.toLocaleString() || ''}`);
+        }
+      });
+      calendar.render();
+    }
+
+    async function addAccount() {
+      try {
+        await msalInstance.loginPopup({ scopes: SCOPES, prompt: 'select_account' });
+        updateUI();
+        loadAllEvents();
+      } catch (e) { console.error(e); alert('Login failed: ' + e.message); }
+    }
+
+    async function logoutAll() {
+      const accounts = msalInstance.getAllAccounts();
+      for (const acc of accounts) {
+        await msalInstance.logoutPopup({ account: acc });
+      }
+      allEvents = [];
+      calendarVisibility = {};
+      updateUI();
+      calendar.refetchEvents();
+    }
+
+    function updateUI() {
+      const accounts = msalInstance.getAllAccounts();
+      const list = document.getElementById('accountsList');
+      if (accounts.length === 0) {
+        list.innerHTML = 'No accounts signed in yet. Click <b>Add Account</b>.';
+        document.getElementById('status').textContent = 'Not signed in';
+        return;
+      }
+      document.getElementById('status').textContent = `${accounts.length} account(s) connected`;
+      // accounts list is rebuilt after loading calendars
+    }
+
+    async function getToken(account) {
+      try {
+        const resp = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account });
+        return resp.accessToken;
+      } catch {
+        const resp = await msalInstance.acquireTokenPopup({ scopes: SCOPES, account, prompt: 'select_account' });
+        return resp.accessToken;
+      }
+    }
+
+    async function loadAllEvents() {
+      const accounts = msalInstance.getAllAccounts();
+      if (accounts.length === 0) return;
+      document.getElementById('status').textContent = 'Loading calendars...';
+      allEvents = [];
+      const accountsList = document.getElementById('accountsList');
+      accountsList.innerHTML = '';
+
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
+      const end = new Date(now.getFullYear(), now.getMonth() + 2, 0).toISOString();
+
+      for (let i = 0; i < accounts.length; i++) {
+        const account = accounts[i];
+        const color = colors[i % colors.length];
+        try {
+          const token = await getToken(account);
+          const calendarsRes = await fetch('https://graph.microsoft.com/v1.0/me/calendars', {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const calendarsData = await calendarsRes.json();
+          const calendars = calendarsData.value || [];
+
+          const accDiv = document.createElement('div');
+          accDiv.className = 'account-item';
+          accDiv.innerHTML = `<strong style="color:${color}">${account.username}</strong>`;
+
+          for (const cal of calendars) {
+            const key = `${account.homeAccountId}|${cal.id}`;
+            if (calendarVisibility[key] === undefined) calendarVisibility[key] = true;
+
+            const label = document.createElement('label');
+            label.className = 'cal-toggle';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = calendarVisibility[key];
+            cb.onchange = () => { calendarVisibility[key] = cb.checked; calendar.refetchEvents(); };
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(cal.name));
+            accDiv.appendChild(label);
+
+            // fetch events for this calendar
+            const url = `https://graph.microsoft.com/v1.0/me/calendars/${cal.id}/calendarView?startDateTime=${start}&endDateTime=${end}&$top=100`;
+            const evRes = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Prefer: 'outlook.timezone="UTC"' } });
+            const evData = await evRes.json();
+            (evData.value || []).forEach(ev => {
+              allEvents.push({
+                id: ev.id,
+                title: ev.subject || '(No title)',
+                start: ev.start.dateTime,
+                end: ev.end.dateTime,
+                allDay: ev.isAllDay,
+                backgroundColor: color,
+                borderColor: color,
+                extendedProps: { account: account.username, calendar: cal.name, key }
+              });
+            });
+          }
+          accountsList.appendChild(accDiv);
+        } catch (e) {
+          console.error(e);
+          accountsList.innerHTML += `<div class="account-item">Error loading ${account.username}: ${e.message}</div>`;
+        }
+      }
+      document.getElementById('status').textContent = `Loaded ${allEvents.length} events from ${accounts.length} account(s)`;
+      calendar.refetchEvents();
+    }
+
+    init();
+  </script>
+</body>
+</html>
